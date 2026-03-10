@@ -1,0 +1,63 @@
+/* The Drop - No Cap News */
+
+/* Reset centering */
+.App {
+  min-height: 100vh;
+}
+
+/* Mobile-first container simulation */
+@media (min-width: 768px) {
+  .App {
+    max-width: 430px;
+    margin: 0 auto;
+    min-height: 100vh;
+    position: relative;
+    box-shadow: 0 0 60px rgba(0, 0, 0, 0.3);
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 0px;
+  height: 0px;
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Line clamp utility */
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.line-clamp-3 {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Smooth image loading */
+img {
+  opacity: 1;
+}
+
+/* Selection color */
+::selection {
+  background: #CCFF00;
+  color: #050505;
+}
+
+/* Pulse animation for loading */
+@keyframes pulse-glow {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
+}
