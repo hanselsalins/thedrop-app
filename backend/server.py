@@ -3,7 +3,6 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-from openai import AsyncOpenAI
 import os
 import logging
 from pathlib import Path
@@ -29,13 +28,7 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-openai_client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-
-JWT_SECRET = os.environ.get("JWT_SECRET")
-if not JWT_SECRET:
-    raise RuntimeError(
-        "JWT_SECRET environment variable is required. Set it before starting the server."
-    )
+JWT_SECRET = os.environ.get('JWT_SECRET', 'thedrop-nocap-secret-2026')
 JWT_ALGORITHM = "HS256"
 security = HTTPBearer(auto_error=False)
 
@@ -524,35 +517,16 @@ async def get_streak_reminder_message(user: dict) -> str:
 async def rewrite_article_for_age_group(title: str, content: str, age_group: str, category: str,
                                          source_language: str = "English",
                                          source_country: str = "US") -> dict:
-    api_key = os.environ.get("OPENAI_API_KEY")
+    from emergentintegrations.llm.chat import LlmChat, UserMessage
+    api_key = os.environ.get('EMERGENT_LLM_KEY')
     if not api_key:
-        return {
-            "title": title,
-            "summary": content[:150],
-            "body": content,
-            "reading_time": "2 min",
-            "low_confidence_flag": False,
-            "rewrite_status": "failed",
-        }
-
-    try:
-        if source_language in ("Urdu", "Bangla"):
-            model = os.environ["OPENAI_MODEL_PREMIUM"]
-        else:
-            model = os.environ["OPENAI_MODEL_DEFAULT"]
-    except KeyError as e:
-        logger.error(f"Missing OpenAI model environment variable: {e}")
-        return {
-            "title": title,
-            "summary": content[:150],
-            "body": content,
-            "reading_time": "2 min",
-            "low_confidence_flag": source_language in ("Urdu", "Bangla"),
-            "rewrite_status": "failed",
-        }
+        return {"title": title, "summary": content[:150], "body": content, "reading_time": "2 min",
+                "low_confidence_flag": False, "rewrite_status": "failed"}
 
     system_prompt = await get_prompt_for_age_group(age_group)
     safety = await get_safety_wrapper()
+    chat = LlmChat(api_key=api_key, session_id=f"rewrite-{uuid.uuid4()}",
+                    system_message=system_prompt + "\n" + safety).with_model("openai", "gpt-4o")
 
     # Build the rewrite prompt — pass source_language directly to GPT-4o
     confidence_instruction = ""
@@ -580,15 +554,8 @@ Return ONLY valid JSON, no markdown, no code blocks.{confidence_instruction}"""
     # Retry logic: attempt once, if fails retry, then mark for manual review
     for attempt in range(2):
         try:
-            response = await openai_client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt + "\n" + safety},
-                    {"role": "user", "content": prompt},
-                ],
-            )
-            message_content = response.choices[0].message.content or ""
-            clean = message_content.strip()
+            response = await chat.send_message(UserMessage(text=prompt))
+            clean = response.strip()
             if clean.startswith("```"):
                 clean = clean.split("\n", 1)[1] if "\n" in clean else clean[3:]
                 if clean.endswith("```"):
@@ -608,39 +575,28 @@ Return ONLY valid JSON, no markdown, no code blocks.{confidence_instruction}"""
         except Exception as e:
             logger.error(f"AI rewrite attempt {attempt + 1} failed for age_group={age_group}, lang={source_language}: {e}")
             if attempt == 0:
+                # Create fresh chat for retry
+                chat = LlmChat(api_key=api_key, session_id=f"rewrite-retry-{uuid.uuid4()}",
+                                system_message=system_prompt + "\n" + safety).with_model("openai", "gpt-4o")
                 continue
 
     # Both attempts failed — flag for manual review
     logger.error(f"Rewrite failed after 2 attempts: title='{title[:50]}', lang={source_language}")
-    return {
-        "title": title,
-        "summary": content[:150],
-        "body": content[:500],
-        "reading_time": "2 min",
-        "rewrite_status": "failed",
-        "low_confidence_flag": source_language in ("Urdu", "Bangla"),
-    }
+    return {"title": title, "summary": content[:150], "body": content[:500],
+            "reading_time": "2 min", "rewrite_status": "failed",
+            "low_confidence_flag": source_language in ("Urdu", "Bangla")}
 
 
 # ===== MICRO-FACTS GENERATION =====
 async def generate_micro_facts(age_group: str):
-    api_key = os.environ.get("OPENAI_API_KEY")
+    from emergentintegrations.llm.chat import LlmChat, UserMessage
+    api_key = os.environ.get('EMERGENT_LLM_KEY')
     if not api_key:
         return
 
-    try:
-        model = os.environ["OPENAI_MODEL_DEFAULT"]
-    except KeyError as e:
-        logger.error(f"Missing OpenAI model environment variable: {e}")
-        return
-
     # Get today's top article titles for context
-    articles = await db.articles.find(
-        {}, {"_id": 0, "original_title": 1, "category": 1}
-    ).sort("crawled_at", -1).to_list(10)
-    titles_context = "\n".join(
-        [f"- [{a.get('category','general')}] {a['original_title']}" for a in articles[:8]]
-    )
+    articles = await db.articles.find({}, {"_id": 0, "original_title": 1, "category": 1}).sort("crawled_at", -1).to_list(10)
+    titles_context = "\n".join([f"- [{a.get('category','general')}] {a['original_title']}" for a in articles[:8]])
 
     prompt_intro = {
         "8-10": "You write fun facts for kids aged 8-10. Use very simple words, max 20 words per fact. Make it exciting!",
@@ -649,7 +605,8 @@ async def generate_micro_facts(age_group: str):
         "17-20": "You write insightful facts for young adults aged 17-20. Be sophisticated, max 35 words per fact.",
     }
 
-    system_message = prompt_intro.get(age_group, prompt_intro["14-16"])
+    chat = LlmChat(api_key=api_key, session_id=f"facts-{uuid.uuid4()}",
+                    system_message=prompt_intro.get(age_group, prompt_intro["14-16"])).with_model("openai", "gpt-4o")
 
     msg = f"""Generate 6 surprising "Did You Know?" micro-facts loosely related to today's news topics.
 
@@ -660,15 +617,8 @@ Return ONLY a valid JSON array of objects with keys: "fact" (the micro-fact text
 No markdown, no code blocks. Just the JSON array."""
 
     try:
-        response = await openai_client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": msg},
-            ],
-        )
-        message_content = response.choices[0].message.content or ""
-        clean = message_content.strip()
+        response = await chat.send_message(UserMessage(text=msg))
+        clean = response.strip()
         if clean.startswith("```"):
             clean = clean.split("\n", 1)[1] if "\n" in clean else clean[3:]
             if clean.endswith("```"):
@@ -680,17 +630,9 @@ No markdown, no code blocks. Just the JSON array."""
         for f in facts:
             await db.micro_facts.update_one(
                 {"fact": f["fact"], "date": today, "age_group": age_group},
-                {
-                    "$set": {
-                        "fact": f["fact"],
-                        "category": f.get("category", "general"),
-                        "date": today,
-                        "age_group": age_group,
-                        "id": str(uuid.uuid4()),
-                    }
-                },
-                upsert=True,
-            )
+                {"$set": {"fact": f["fact"], "category": f.get("category", "general"),
+                           "date": today, "age_group": age_group, "id": str(uuid.uuid4())}},
+                upsert=True)
         logger.info(f"Generated {len(facts)} micro-facts for age_group={age_group}")
     except Exception as e:
         logger.error(f"Micro-fact generation failed: {e}")
@@ -1990,11 +1932,9 @@ async def _initial_crawl():
 app.include_router(api_router)
 
 app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(","),
-    allow_methods=["*"],
-    allow_headers=["*"],
+    CORSMiddleware, allow_credentials=True,
+    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_methods=["*"], allow_headers=["*"],
 )
 
 @app.on_event("shutdown")

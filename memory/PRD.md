@@ -7,7 +7,7 @@ Build a full-stack news aggregator app called "The Drop" with mobile-first respo
 - **Backend**: FastAPI + MongoDB + OpenAI GPT-4o (via Emergent LLM key)
 - **Frontend**: React + Tailwind CSS + Framer Motion
 - **Data**: RSS feeds from 200+ international sources across 20 countries
-- **AI**: OpenAI GPT models (configured via environment variables) for multi-lingual article rewriting
+- **AI**: emergentintegrations library with GPT-4o for multi-lingual article rewriting
 
 ## User Personas
 - **Group A (8-10)**: Kids - simple language, big images, emojis, short sentences
