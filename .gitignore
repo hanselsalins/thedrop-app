@@ -83,3 +83,7 @@ android-sdk/ -e
 .env.example
 *.env
 *.env.*
+
+# SSH keys for Lovable sync
+lovable_sync_key
+lovable_sync_key.pub
