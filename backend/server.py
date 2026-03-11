@@ -520,16 +520,8 @@ async def get_streak_reminder_message(user: dict) -> str:
 async def rewrite_article_for_age_group(title: str, content: str, age_group: str, category: str,
                                          source_language: str = "English",
                                          source_country: str = "US") -> dict:
-    from emergentintegrations.llm.chat import LlmChat, UserMessage
-    api_key = os.environ.get('EMERGENT_LLM_KEY')
-    if not api_key:
-        return {"title": title, "summary": content[:150], "body": content, "reading_time": "2 min",
-                "low_confidence_flag": False, "rewrite_status": "failed"}
-
     system_prompt = await get_prompt_for_age_group(age_group)
     safety = await get_safety_wrapper()
-    chat = LlmChat(api_key=api_key, session_id=f"rewrite-{uuid.uuid4()}",
-                    system_message=system_prompt + "\n" + safety).with_model("openai", "gpt-4o")
 
     # Build the rewrite prompt — pass source_language directly to GPT-4o
     confidence_instruction = ""
@@ -557,8 +549,28 @@ Return ONLY valid JSON, no markdown, no code blocks.{confidence_instruction}"""
     # Retry logic: attempt once, if fails retry, then mark for manual review
     for attempt in range(2):
         try:
-            response = await chat.send_message(UserMessage(text=prompt))
-            clean = response.strip()
+            if openai_client is None:
+                logger.error("OpenAI client is not configured; skipping rewrite.")
+                return {"title": title, "summary": content[:150], "body": content, "reading_time": "2 min",
+                        "low_confidence_flag": False, "rewrite_status": "failed"}
+
+            model = os.environ.get("OPENAI_MODEL_DEFAULT", "gpt-4o-mini")
+
+            response = openai_client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": system_prompt + "\n" + safety,
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    },
+                ],
+            )
+
+            clean = response.choices[0].message.content.strip()
             if clean.startswith("```"):
                 clean = clean.split("\n", 1)[1] if "\n" in clean else clean[3:]
                 if clean.endswith("```"):
