@@ -3,6 +3,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from openai import OpenAI
 import os
 import logging
 from pathlib import Path
@@ -27,6 +28,8 @@ from global_sources import GLOBAL_SOURCES, get_country_by_code, get_active_sourc
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
+
+openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 JWT_SECRET = os.environ.get('JWT_SECRET', 'thedrop-nocap-secret-2026')
 JWT_ALGORITHM = "HS256"
@@ -589,11 +592,6 @@ Return ONLY valid JSON, no markdown, no code blocks.{confidence_instruction}"""
 
 # ===== MICRO-FACTS GENERATION =====
 async def generate_micro_facts(age_group: str):
-    from emergentintegrations.llm.chat import LlmChat, UserMessage
-    api_key = os.environ.get('EMERGENT_LLM_KEY')
-    if not api_key:
-        return
-
     # Get today's top article titles for context
     articles = await db.articles.find({}, {"_id": 0, "original_title": 1, "category": 1}).sort("crawled_at", -1).to_list(10)
     titles_context = "\n".join([f"- [{a.get('category','general')}] {a['original_title']}" for a in articles[:8]])
@@ -605,9 +603,6 @@ async def generate_micro_facts(age_group: str):
         "17-20": "You write insightful facts for young adults aged 17-20. Be sophisticated, max 35 words per fact.",
     }
 
-    chat = LlmChat(api_key=api_key, session_id=f"facts-{uuid.uuid4()}",
-                    system_message=prompt_intro.get(age_group, prompt_intro["14-16"])).with_model("openai", "gpt-4o")
-
     msg = f"""Generate 6 surprising "Did You Know?" micro-facts loosely related to today's news topics.
 
 Today's news topics:
@@ -617,8 +612,27 @@ Return ONLY a valid JSON array of objects with keys: "fact" (the micro-fact text
 No markdown, no code blocks. Just the JSON array."""
 
     try:
-        response = await chat.send_message(UserMessage(text=msg))
-        clean = response.strip()
+        if openai_client is None:
+            logger.error("OpenAI client is not configured; skipping micro-fact generation.")
+            return
+
+        model = os.environ.get("OPENAI_MODEL_DEFAULT", "gpt-4o-mini")
+
+        response = openai_client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": prompt_intro.get(age_group, prompt_intro["14-16"]),
+                },
+                {
+                    "role": "user",
+                    "content": msg,
+                },
+            ],
+        )
+
+        clean = response.choices[0].message.content.strip()
         if clean.startswith("```"):
             clean = clean.split("\n", 1)[1] if "\n" in clean else clean[3:]
             if clean.endswith("```"):
