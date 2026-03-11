@@ -1850,9 +1850,9 @@ async def trigger_country_crawl(country_code: str, background_tasks: BackgroundT
     return {"message": f"Crawl started for {country_code}. Processing in background."}
 
 @api_router.post("/rewrite")
-async def trigger_rewrite(age_group: str = "14-16"):
-    await rewrite_pending_articles(age_group)
-    return {"message": f"Rewrites complete for age_group={age_group}"}
+async def trigger_rewrite(background_tasks: BackgroundTasks, age_group: str = "14-16"):
+    background_tasks.add_task(rewrite_pending_articles, age_group)
+    return {"message": f"Rewrites started for age_group={age_group} in background"}
 
 @api_router.get("/stats")
 async def get_stats():
