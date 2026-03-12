@@ -735,8 +735,35 @@ async def crawl_rss_feeds(country_code: str = None):
                     article_id = str(uuid.uuid4())
                     logo_url = src.get("logo_url", "") or await get_source_logo(src["name"])
 
-                    # Determine category from source's category_tags
+                    # Determine category using AI classification, with fallback to source's category_tags
                     category = src.get("category_tags", ["world"])[0]
+                    try:
+                        if openai_client is not None:
+                            model = os.environ.get("OPENAI_MODEL_DEFAULT", "gpt-4o-mini")
+                            title = entry.get('title', '')
+                            classify_prompt = (
+                                "Given this news headline: '{title}'\n"
+                                "Classify it into exactly one of these categories: world, science, money, "
+                                "history, entertainment, local\n"
+                                "Reply with only the single category word, nothing else."
+                            ).format(title=title.replace("'", "\\'"))
+
+                            response = openai_client.chat.completions.create(
+                                model=model,
+                                messages=[
+                                    {
+                                        "role": "user",
+                                        "content": classify_prompt,
+                                    }
+                                ],
+                            )
+                            ai_category = response.choices[0].message.content.strip().lower()
+                            allowed_categories = {"world", "science", "money", "history", "entertainment", "local"}
+                            if ai_category in allowed_categories:
+                                category = ai_category
+                    except Exception as e:
+                        logger.error(f"AI category classification failed for '{entry.get('title','')}', "
+                                     f"falling back to source category: {e}")
 
                     await db.articles.insert_one({
                         "id": article_id,
