@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from openai import OpenAI
+from anthropic import AsyncAnthropic
 import os
 import logging
 from pathlib import Path
@@ -30,6 +31,7 @@ client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
 openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+anthropic_client = AsyncAnthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
 JWT_SECRET = os.environ.get('JWT_SECRET', 'thedrop-nocap-secret-2026')
 JWT_ALGORITHM = "HS256"
@@ -517,6 +519,20 @@ async def get_streak_reminder_message(user: dict) -> str:
 
 
 # ===== AI REWRITING =====
+async def rewrite_with_claude(system_prompt: str, user_prompt: str) -> str:
+    try:
+        response = await anthropic_client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=1500,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        return response.content[0].text
+    except Exception as e:
+        logger.error(f"rewrite_with_claude failed: {e}")
+        return ""
+
+
 async def rewrite_article_for_age_group(title: str, content: str, age_group: str, category: str,
                                          source_language: str = "English",
                                          source_country: str = "US") -> dict:
@@ -533,44 +549,29 @@ Add a "confidence" key to your JSON response with value "HIGH" or "LOW".
 Rate "LOW" if: the source text was ambiguous, contained idioms you're unsure about, or if the meaning might be lost in translation.
 Rate "HIGH" if you are confident the rewrite accurately captures the original meaning.""".format(lang=source_language)
 
-    prompt = f"""Rewrite this news article. The source language is {source_language}. Rewrite the output entirely in English regardless of the source language.
+    user_prompt = f"""Rewrite this news article. The source language is {source_language}. Rewrite the output entirely in English regardless of the source language.
 Respond in valid JSON only with keys: title, summary, body, wonder_question, reading_time{', confidence' if source_language in ('Urdu', 'Bangla') else ''}.
 
 Source Language: {source_language}
 Source Country: {source_country}
 Original Title: {title}
-Original Content: {content[:2000]}
+Original Content: {content[:4000]}
 Category: {category}
 Target Age Group: {age_group}
 
 Map: "title"=Headline, "summary"=Summary, "body"=Story, "wonder_question"=Wonder Question, "reading_time"=estimated reading time.
 Return ONLY valid JSON, no markdown, no code blocks.{confidence_instruction}"""
 
+    combined_system = system_prompt + "\n" + safety
+
     # Retry logic: attempt once, if fails retry, then mark for manual review
     for attempt in range(2):
         try:
-            if openai_client is None:
-                logger.error("OpenAI client is not configured; skipping rewrite.")
-                return {"title": title, "summary": content[:150], "body": content, "reading_time": "2 min",
-                        "low_confidence_flag": False, "rewrite_status": "failed"}
+            raw = await rewrite_with_claude(combined_system, user_prompt)
+            if not raw:
+                raise ValueError("Empty response from Claude")
 
-            model = os.environ.get("OPENAI_MODEL_DEFAULT", "gpt-4o-mini")
-
-            response = openai_client.chat.completions.create(
-                model=model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": system_prompt + "\n" + safety,
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt,
-                    },
-                ],
-            )
-
-            clean = response.choices[0].message.content.strip()
+            clean = raw.strip()
             if clean.startswith("```"):
                 clean = clean.split("\n", 1)[1] if "\n" in clean else clean[3:]
                 if clean.endswith("```"):
@@ -589,11 +590,7 @@ Return ONLY valid JSON, no markdown, no code blocks.{confidence_instruction}"""
             return result
         except Exception as e:
             logger.error(f"AI rewrite attempt {attempt + 1} failed for age_group={age_group}, lang={source_language}: {e}")
-            if attempt == 0:
-                # Create fresh chat for retry
-                chat = LlmChat(api_key=api_key, session_id=f"rewrite-retry-{uuid.uuid4()}",
-                                system_message=system_prompt + "\n" + safety).with_model("openai", "gpt-4o")
-                continue
+            continue
 
     # Both attempts failed — flag for manual review
     logger.error(f"Rewrite failed after 2 attempts: title='{title[:50]}', lang={source_language}")
